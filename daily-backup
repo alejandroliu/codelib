@@ -2,8 +2,14 @@
 #
 # Daily script
 #
-world=$(dirname $(readlink -f $0))
-. $world/ashlib/rotate.sh
+scriptdir=$(dirname $(readlink -f $0))
+if [ -z "$1" ] ; then
+  echo "Must specify a base directory"
+  exit 1
+fi
+world="$1"
+  
+. $scriptdir/ashlib/rotate.sh
 log="$world/logs/daily.log"
 rotate $log
 exec >>$log 2>&1 </dev/null
