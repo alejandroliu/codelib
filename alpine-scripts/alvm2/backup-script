@@ -1,0 +1,168 @@
+#!/bin/sh
+#
+# Runs backups
+#
+set -euf -o pipefail
+scriptdir=$(dirname $(readlink -f "$0"))
+
+verbose=
+
+usage() {
+  echo "$0 {cmd}" 1>&2
+  exit 10
+}
+
+quit() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+
+
+stop() {
+  :
+}
+
+setup_drives() {
+  local dd
+  rm -rf /media/targets
+  mkdir -p /media/targets
+  source_volumes=
+
+  echo "Probing attached devices"
+  for dd in $(find /dev -mindepth 1 -maxdepth 1 -name xvd?1)
+  do
+    mp=/media/$(basename $dd)
+    [ -d "$mp" ] && continue
+    mkdir -p $mp
+    if mount -t xfs $dd $mp ; then
+      if [ -f $mp/backup.target ] ; then
+        (
+	  while read l
+	  do
+	    l=$(echo $l)
+	    ln -s $mp /media/targets/"$l"
+	    echo "- Target: $l => $mp"
+	  done
+	) < $mp/backup.target
+      else
+	if [ -f $mp/.snapshot ] ; then
+	  # Make sure it is mounted RO...
+	  mount -o remount,ro $mp
+	  if [ -z "$source_volumes" ] ; then
+	    source_volumes="$mp"
+	  else
+	    source_volumes="$source_volumes $mp"
+	  fi
+	fi
+      fi
+    fi
+  done
+}  
+
+backup_source() {
+  local src="$1"
+  read target bid mode opts || return 0
+  if [ ! -d /media/targets/$target ] ; then
+    echo "$src: $target ($bid:$mode) not found, skipping"
+    return 0
+  fi
+  echo "$src: backing to $target ($bid:$mode)"
+
+  case "$mode" in
+    rdiff)
+      time rdiff-backup $verbose $opts "$src" "/media/targets/$target/$bid"
+      ;;
+    mirror)
+      time rsync $verbose -a --delete $opts "$src/" "/media/targets/$target/$bid"
+      ;;
+    *)
+      echo "Invalid backup mode: $mode"
+      ;;
+  esac
+}
+
+process_sources() {
+  local drive
+  for drive in "$@"
+  do
+    find $drive -maxdepth 4 -type f -name 'backup.source' | (
+      while read source
+      do
+	backup_source $(dirname "$source") < $source
+      done
+    )
+  done
+}
+
+mk_config_nfs() {
+  # Configure NFS exports here...
+  cat <<-EOF
+	# /etc/exports
+	#
+	# See exports(5) for a description.
+
+	# use exportfs -arv to reread
+	#/export    192.168.1.10(rw,no_root_squash)
+
+	EOF
+  find /media/targets -mindepth 1 -maxdepth 1 -type l | (
+    while read f
+    do
+      [ ! -L "$f" ] && continue
+      mnt=$(readlink -f "$f")
+      [ ! -d "$mnt" ] && continue
+      echo "$mnt"
+    done
+  ) |  sort -u | (
+    while read mnt
+    do
+      echo "$mnt *(ro,no_subtree_check,mountpoint=$mnt,no_root_squash)"
+    done
+  )
+}
+
+config_nfs() {
+  local cfg=/etc/exports
+  if [ -f "$cfg" ] ; then
+    local ctxt=":"
+  else
+    local ctxt="$(sed -e 's/^/:/' "$cfg")"
+  fi
+  local ntxt="$(mk_config_nfs | sed -e 's/^://')"
+  if [ x"$ntxt" != x"$ctxt" ] ; then
+    echo "Updating $cfg"
+    echo "$ntxt" > "$cfg"
+  fi
+}
+
+start() {
+  setup_drives
+  config_nfs
+  rc-service nfs stop || :
+  rc-service nfs start || :
+  
+  if [ -n "$source_volumes" ] ; then
+    echo "SOURCE VOLUMES: $source_volumes"
+    process_sources $source_volumes
+    poweroff
+  fi
+}  
+  
+[ $# -eq 0 ] && usage
+op="$1" ; shift
+
+case "$op" in
+  start)
+    start "$@"
+    ;;
+  stop)
+    stop "$@"
+    ;;
+  *)
+    echo "Invalid op: $op" 1>&2
+    exit 28
+    ;;
+esac
+
+

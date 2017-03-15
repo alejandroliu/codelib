@@ -1,0 +1,148 @@
+#!/bin/sh
+#
+# Simple script for handling removable eSATA devices
+#
+set -euf -o pipefail
+
+[ -z "${controller:-}" ] && controller=pata_atiixp
+
+usage() {
+  echo "$0 op [args]" 1>&2
+  exit 10
+}
+
+
+get_hosts() {
+  local host
+  for host in $(find /sys/class/scsi_host -maxdepth 1 -mindepth 1 -name host*)
+  do
+    [ -f "$host/proc_name" ] || continue
+    local drv="$(cat $host/proc_name)"
+    [ x"$drv" != x"$controller" ] && continue
+    echo $host
+  done
+}
+
+scan_bus() {
+  local host
+  for host in $(get_hosts)
+  do
+    echo '- - -' > $host/scan
+  done
+}
+
+get_drives() {
+  if [ "$#" -eq 0 ] ; then
+    set - $(get_hosts)
+  fi
+  local host i j k
+  for host in "$@"
+  do
+    local hn=$(basename "$host" | tr -dc 0-9) 
+    for i in $(find $host/device/ -mindepth 1 -maxdepth 1 -type d -name 'target*')
+    do
+      for j in $(find $i -mindepth 1 -maxdepth 1 -type d -name "$hn"':*')
+      do
+        [ ! -d "$j/block" ] && continue
+        for k in $(find $j/block -mindepth 1 -maxdepth 1 -type d)
+        do
+	  k=$(basename $k)
+	  [ -b /dev/$k ] && echo $k
+        done
+      done
+    done
+  done
+  for i in $(find /sys/block -mindepth 1 -maxdepth 1)
+  do
+    [ ! -f "$i/removable" ] && continue
+    [ $(cat "$i/removable") -eq 0 ] && continue
+    basename $i
+  done
+  for i in $(find /sys/block -mindepth 1 -maxdepth 1)
+  do
+    (readlink $i | grep -q '/usb') || continue
+    basename $i
+  done
+}
+
+get_drive_host() {
+  local drive="$(basename "$1")" host i
+  for host in $(get_hosts)
+  do
+    for i in $(get_drives $host)
+    do
+      if [ x"$i" = x"$drive" ] ; then
+	echo $host
+	return 0
+      fi
+    done
+  done
+  return 1
+}
+
+eject_drive() {
+  local drive
+  for drive in "$@"
+  do
+    drive=$(basename "$drive")
+    local host=$(get_drive_host "$drive")
+    [ -z "$host" ] && continue
+    echo Deleting $drive: $host 1>&2
+    echo 1 > /sys/block/$drive/device/delete
+  done
+}
+
+show_help() {
+  cat <<-EOF
+	Sub-commands:
+
+	$0 eject [drives]
+	    Eject the specified drives
+	$0 probe [fast]
+	    Scan the bus
+	$0 is_mounted partition
+
+	Params:
+
+	  - controller : driver to use
+	
+	EOF
+}
+
+is_mounted() {
+  [ $# -ne 1 ] && usage
+  local fdev=$(readlink -f "$1")
+  local mp=$(mount | awk '$1 == "'"$fdev"'" { print $3 }')
+  [ -z "$mp" ] && exit 1
+  echo $mp
+  exit 0
+}
+
+
+[ $# -eq 0 ] && usage
+op="$1" ; shift
+
+case "$op" in
+  eject)
+    eject_drive "$@"
+    ;;
+  is_mounted)
+    is_mounted "$@"
+    ;;
+  probe)
+    if [ $# -eq 0 ] ; then
+      echo -n scanning bus... 1>&2
+      scan_bus
+      echo done. 1>&2
+    fi
+    get_drives | sort -u
+    ;;
+  help)
+    show_help
+    ;;
+  *)
+    echo "Invalid op.  Try help" 1>&2
+    exit 1
+    ;;
+esac
+

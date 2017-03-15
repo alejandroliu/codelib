@@ -1,0 +1,4 @@
+
+We need to add this to the CN1 boot
+
+echo -1 > /sys/module/usbcore/parameters/autosuspend 

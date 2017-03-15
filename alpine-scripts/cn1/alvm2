@@ -1,0 +1,147 @@
+#!/bin/sh
+#
+# Manages our backup agent VM
+#
+set -euf -o pipefail
+vm=alvm2
+tout=600 # Time to wait when shutting down VM before destroying!
+snaptpl=alvm1-v?-snap
+vg=/dev/mdvg0
+
+scriptdir=$(dirname $(readlink -f "$0"))
+esata=$scriptdir/esata
+
+
+usage() {
+  echo "$0 {cmd}" 1>&2
+  exit 10
+}
+
+quit() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+
+is_vm_running() {
+  [ $(xl list | awk '$1 == "'"$1"'" { print }' | wc -l) -eq 0 ] && return 1
+  return 0
+}
+
+wait() {
+  while is_vm_running "$vm"
+  do
+    sleep 3
+  done
+}
+
+stop() {
+  is_vm_running "$vm" || return 0
+  xl shutdown "$vm" || return $?
+  count=0
+  while [ $count -lt $tout ] 
+  do
+    is_vm_running "$vm" || return 0
+    sleep 2
+    count=$(expr $count + 1)
+  done
+  xl destroy "$vm" || return $?
+  count=0
+  while [ $count -lt $tout ] 
+  do
+    is_vm_running "$vm" || return 0
+    sleep 2
+    count=$(expr $count + 1)
+  done
+  echo "Failed to stop $vm" 1>&2
+  exit 1
+}
+
+re_config() {
+    first=true
+    lun=0
+    while read L
+    do
+      if (echo "$L" | grep -q vdev=xvd) ; then
+	if $first ; then
+	  first=false
+	  echo $L
+	  for pt in $parts
+	  do
+	    $esata is_mounted "$pt" >/dev/null && continue
+	    lun=$(expr $lun + 1)
+	    lunid=$(awk 'BEGIN{printf "%c", '$lun'+97}')
+	    echo ":	'format=raw,vdev=xvd${lunid}1,access=w,target=$pt',"
+	  done
+	  # Configure any snaps...
+	  for snap in $(find "$vg" -mindepth 1 -maxdepth 1 -name "$snaptpl")
+	  do
+	    lun=$(expr $lun + 1)
+	    lunid=$(awk 'BEGIN{printf "%c", '$lun'+97}')
+	    echo ":	'format=raw,vdev=xvd${lunid}1,access=w,target=$snap',"
+	  done
+	fi
+      else
+	echo "$L"
+      fi
+    done
+}  
+
+start() {
+  opts=""
+  while [ $# -gt 0 ]
+  do
+    case "$1" in
+      -c)
+	opts="-c"
+	;;
+      *)
+	break
+    esac
+    shift
+  done
+  
+  is_vm_running $vm && return
+  xencfg="/etc/xen/$vm.cfg"
+  [ ! -f "$xencfg" ] && quit 52 "No $xencfg found"
+  drives=$($esata probe fast)
+  [ -z "$drives" ] && quit 53 "No backup drives found"
+
+  parts=$(for d in $drives ; do find /dev -type b -name "$d?" ; done)
+  echo Devices:$parts 1>&2
+
+  intxt="$(sed -e 's/^/:/' "$xencfg")"
+  outxt="$(echo "$intxt" | re_config)"
+  if [ x"$intxt" != x"outxt" ] ; then
+    echo "Updating config" 1>&2
+    echo "$outxt" | sed -e 's/^://' > "$xencfg"
+  fi
+  xl create $opts "$xencfg"
+}  
+  
+[ $# -eq 0 ] && usage
+op="$1" ; shift
+
+case "$op" in
+  start)
+    start "$@"
+    ;;
+  cfg)
+    drives=$($esata probe fast)
+    [ -z "$drives" ] && quit 53 "No backup drives found"
+    parts=$(for d in $drives ; do find /dev -type b -name "$d?" ; done)
+    sed -e 's/^/:/' /etc/xen/$vm.cfg | re_config
+    ;;
+  stop)
+    stop "$@"
+    ;;
+  wait)
+    wait "$@"
+    ;;
+  *)
+    echo "Invalid op: $op" 1>&2
+    exit 28
+    ;;
+esac
+
+

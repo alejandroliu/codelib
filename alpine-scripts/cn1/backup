@@ -1,0 +1,97 @@
+#!/bin/sh
+#
+# Simple backup script
+#
+set -euf -o pipefail
+
+vm=alvm1
+vg=/dev/mdvg0
+lockfile=/tmp/snapshot.mgr
+ssz=10G
+
+scriptdir=$(dirname $(readlink -f "$0"))
+esata=$scriptdir/esata
+vmcmd=$scriptdir/alvm2
+
+usage() {
+  echo "$0 {cmd}" 1>&2
+  exit 10
+}
+
+[ $# -eq 0 ] && usage
+op="$1" ; shift
+
+quit() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+snapshot() {
+  
+  exec 3>> $lockfile
+  flock -n -x 3 || quit 26 "Failed to obtain lock"
+  
+  [ $(find "$vg" -mindepth 1 -maxdepth 1 -name "$vm"'-v?-snap' | wc -l) -gt 0 ] && quit 28 "Snaps already exist"
+  targets=$(find "$vg" -mindepth 1 -maxdepth 1 -name "$vm"'-v?')
+  drives=$($esata probe fast)
+  [ -z "$drives" ] && quit 53 "No backup drives found"
+
+
+  # Make snapshots
+  snaps=""
+  for src in $targets
+  do
+    dst=$(basename "$src")-snap
+    if lvcreate -L$ssz -s -n $dst $src 3>&- ; then
+      tmpmnt=$(mktemp -d)
+      if mount "$vg/$dst" $tmpmnt ; then
+	touch $tmpmnt/.snapshot # Mark snapshot within FS...
+	umount $tmpmnt
+	if [ -z "$snaps" ] ; then
+	  snaps="$vg/$dst"
+	else
+	  snaps="$snaps $vg/$dst"
+	fi
+      else
+	# Wouldn't recognize FS...
+	lvremove -f "$vg/$dst"
+      fi
+      rmdir $tmpmnt
+    fi
+  done
+
+  echo "Stopping running VM" 1>&2
+  $vmcmd stop
+
+  #$vmcmd start
+  #echo "Waiting for VM to finish..." 1>&2
+  #$vmcmd wait
+  $vmcmd start -c
+
+  for sn in $snaps
+  do
+    lvremove -f $sn 3>&-
+  done
+  echo "Re-starting VM" 1>&2
+  $vmcmd start 3>&-
+}
+
+
+case "$op" in
+  snapshot)
+    # Create snapshot
+    snapshot "$@"
+    ;;
+  ovl)
+    ovl="$(find /media/usb -maxdepth 1 -mindepth 1 -type f -name '*.apkovl.tar.gz' -print | head -1)"
+    ( cd "$(dirname "$ovl")" && md5sum "$(basename "$ovl")" ) || exit 1
+    exec cat "$ovl"
+    exit 0
+    ;;
+  *)
+    echo "Invalid op: $op" 1>&2
+    exit 28
+    ;;
+esac
+
+

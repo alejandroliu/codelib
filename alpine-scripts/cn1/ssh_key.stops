@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# Handles backup operations
+#
+case "$SSH_ORIGINAL_COMMAND" in
+  snapshot)
+    /etc/adm/backup snapshot
+    ;;
+  ovl)
+    /etc/adm/backup ovl
+    ;;
+  *)
+    die 12 "Unknown command: $SSH_ORIGINAL_COMMAND"
+    ;;
+esac
+

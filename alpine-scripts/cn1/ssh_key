@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# Script that handles SSH keys with force command
+#
+die() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+
+[ $# -eq 0 ] && die 11 "Unknonw key"
+
+key="$(echo "$1" | tr -dc _.,a-zA-Z0-9-)"
+script="$(readlink -f "$0")"
+
+if [ -x "$0.$key" ] ; then
+  . "$0.$key"
+elif [ -x "$0.d/$key" ] ; then
+  . "$0.d/$key"
+elif [ -x "$script.$key" ] ; then
+  . "$script.$key"
+elif [ -x "$script.d/$key" ] ; then
+  . "$script.d/$key"
+else
+  die 19 "Unknown key: $1"
+fi
