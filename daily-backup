@@ -1,0 +1,62 @@
+#!/bin/sh
+#
+# Daily script
+#
+world=$(dirname $(readlink -f $0))
+. $world/ashlib/rotate.sh
+log="$world/logs/daily.log"
+rotate $log
+exec >>$log 2>&1 </dev/null
+
+die() {
+  local rc="$1" ; shift
+  echo "$@" 2>&1
+  exit $rc
+}
+echo '==========================================================='
+date
+echo '==========================================================='
+flock -n -x 1 || die 17 "Failed to obtain lock"
+start=$(date +%s)
+
+echo "1. UNDUP"
+for fs in \
+	/media/xvdb1/d /media/xvdb1/p /media/xvdb1/m \
+	/media/xvdc1/p /media/xvdd1/p
+do
+  echo "FS: $fs"
+  time undup -c "$fs/catalogue.txt" -l "$fs.lock" -e -K -S -v "$fs"
+done
+
+echo "2. REMOTE BACKUPS"
+target=/media/xvdb1/m/a1/backups
+
+(
+  # Backup NEUSOL PROD data
+  rotate $target/NeuSol/backup.zip
+  wget -q -O- http://cvm1.localnet/NeuSol/backup/purge/-30
+  wget -O$target/NeuSol/backup.zip http://cvm1.localnet/NeuSol/backup/run/backup.zip
+) &
+
+# OpenShift instances backup
+openshift_snap() {
+  (
+    local snap="$target/openshift-$1/snapshot.tar.gz"
+    rotate $snap
+    SSH_AUTH_SOCK= ssh -i $world/backup_operator.key "$2" gear snapshot > $snap
+    ls -sh $snap
+  ) &
+}
+openshift_snap wp2 58127a787628e149710000ee@wp2-iliu.rhcloud.com
+openshift_snap appsrv 5763c6dc0c1e660efc000019@appsrv-0ink.rhcloud.com
+openshift_snap wp3 5818a16c7628e11147000040@wp3-0ink.rhcloud.com
+
+wait
+
+echo "Z. snapshots"
+SSH_AUTH_SOCK= ssh -i $world/backup_operator.key root@cn1 snapshot
+
+echo DAILY RUNTIME: $(expr $(date +%s) - $start) seconds
+echo ''
+
+
