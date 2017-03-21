@@ -12,7 +12,7 @@ world="$1"
 . $scriptdir/ashlib/rotate.sh
 log="$world/logs/daily.log"
 rotate $log
-exec >>$log 2>&1 </dev/null
+exec >>$log 2>&1 9>$world/lock </dev/null
 
 die() {
   local rc="$1" ; shift
@@ -22,7 +22,7 @@ die() {
 echo '==========================================================='
 date
 echo '==========================================================='
-flock -n -x 1 || die 17 "Failed to obtain lock"
+flock -n -x 9 || die 17 "Failed to obtain lock"
 start=$(date +%s)
 
 echo "1. UNDUP"
@@ -36,16 +36,38 @@ done
 
 echo "2. REMOTE BACKUPS"
 target=/media/xvdb1/m/a1/backups
+snaps=/media/xvdb1/d/snapshots
 
 (
   # Backup NEUSOL PROD data
-  rotate $target/NeuSol/backup.zip
-  wget -q -O- http://cvm1.localnet/NeuSol/backup/purge/-30
-  wget -O$target/NeuSol/backup.zip http://cvm1.localnet/NeuSol/backup/run/backup.zip
+  zipfile=$target/NeuSol.zip
+  url=http://cvm1.localnet/NeuSol
+  rm -f $zipfile
+  wget -q -O- $url/backup/purge/-30
+  wget -O$zipfile $url/backup/run/backup.zip
+  unzip -q -d $snaps/NeuSol -o $zipfile
 ) &
 
+apkvol_snap() {
+  (
+    SSH_AUTH_SOCK= ssh -i $world/backup_operator.key "$1" ovl | (
+      read md5 apkvol
+      echo "$1: $apkvol ($md5)"
+      mkdir $snaps/$1.t
+      tee $target/apkvol/$apkvol | tar -C $snaps/$1.t -zxf -
+      if echo "$md5 $apkvol" | ( cd $target/apkvol && md5sum -cw ) ; then
+        rm -rf $snaps/$1
+	mv $snaps/$1.t $snaps/$1
+      else
+        rm -rf $snaps/$1.t
+      fi
+    )
+  ) &
+}
+apkvol_snap cn1
+
 # OpenShift instances backup
-openshift_snap() {
+openshift_bak() {
   (
     local snap="$target/openshift-$1/snapshot.tar.gz"
     rotate $snap
@@ -53,9 +75,9 @@ openshift_snap() {
     ls -sh $snap
   ) &
 }
-openshift_snap wp2 58127a787628e149710000ee@wp2-iliu.rhcloud.com
-openshift_snap appsrv 5763c6dc0c1e660efc000019@appsrv-0ink.rhcloud.com
-openshift_snap wp3 5818a16c7628e11147000040@wp3-0ink.rhcloud.com
+openshift_bak wp2 58127a787628e149710000ee@wp2-iliu.rhcloud.com
+openshift_bak appsrv 5763c6dc0c1e660efc000019@appsrv-0ink.rhcloud.com
+openshift_bak wp3 5818a16c7628e11147000040@wp3-0ink.rhcloud.com
 
 wait
 
