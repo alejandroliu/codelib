@@ -6,6 +6,8 @@ set -euf -o pipefail
 scriptdir=$(dirname $(readlink -f "$0"))
 
 verbose=
+rdiff_opts="--exclude **.git --exclude **.ssh"
+rsync_opts=""
 
 usage() {
   echo "$0 {cmd}" 1>&2
@@ -71,10 +73,10 @@ backup_source() {
 
   case "$mode" in
     rdiff)
-      time rdiff-backup $verbose $opts "$src" "/media/targets/$target/$bid"
+      time rdiff-backup $verbose $opts $rdiff_opts "$src" "/media/targets/$target/$bid"
       ;;
     mirror)
-      time rsync $verbose -a --delete $opts "$src/" "/media/targets/$target/$bid"
+      time rsync $verbose -a --delete $opts $rsync_opts "$src/" "/media/targets/$target/$bid"
       ;;
     *)
       echo "Invalid backup mode: $mode"
