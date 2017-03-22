@@ -55,7 +55,7 @@ apkvol_snap() {
       echo "$1: $apkvol ($md5)"
       mkdir $snaps/$1.t
       tee $target/apkvol/$apkvol | tar -C $snaps/$1.t -zxf -
-      if echo "$md5 $apkvol" | ( cd $target/apkvol && md5sum -cw ) ; then
+      if echo "$md5  $apkvol" | ( cd $target/apkvol && md5sum -cw ) ; then
         rm -rf $snaps/$1
 	mv $snaps/$1.t $snaps/$1
       else
