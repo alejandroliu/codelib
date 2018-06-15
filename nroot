@@ -1,0 +1,37 @@
+#!/bin/bash
+if [ $(id -u) -ne 0 ] ; then
+  exec sudo sh "$0" "$@"
+fi
+set -euf -o pipefail
+chroot=/chroot/root.x86_64
+
+if [ ! -f $chroot/proc/cpuinfo ] ; then
+  # Set-up
+  cp /etc/resolv.conf $chroot/etc/resolv.conf
+  
+  for rbind in proc sys run dev home net
+  do
+    mount --rbind /$rbind $chroot/$rbind
+  done
+fi
+
+# exec chroot $chroot /bin/bash -il
+tt=$(cd $chroot && mktemp -p tmp)
+trap "rm '$chroot/$tt'" EXIT
+cat >"$chroot/$tt" <<__EOF__
+#!/bin/sh
+rm "\$0"
+export \
+	DISPLAY=$DISPLAY \
+	PULSE_SERVER=/run/user/$SUDO_UID/pulse/native
+
+if [ "\$#" -eq 0 ] ; then
+  exec /bin/bash -il
+else
+  exec "\$@"
+fi
+__EOF__
+chown $SUDO_UID:$SUDO_GID "$chroot/$tt"
+
+exec chroot "$chroot" su - "$SUDO_USER" -- "/$tt" "$@"
+

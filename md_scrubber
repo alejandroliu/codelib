@@ -1,0 +1,52 @@
+#!/bin/sh
+set -euf -o pipefail
+
+waitcnt=120
+notify_cmd=/etc/notify
+#~ notify_cmd=echo
+
+scrub_check() {
+  local devpath="$1"
+  [ ! -b "$devpath" ] && die 1 "$devpath: Not found"
+  local devname=$(basename "$devpath")
+  local syspath=/sys/block/$devname/md
+  if [ ! -d $syspath ] ; then
+    echo "$devname: SYSFS driver not found!" 1>&2
+    return 1
+  fi
+  if [ x"$(cat $syspath/sync_action)" != x"idle" ] ; then
+    echo "$devname: device is busy $(cat $syspath/sync_action)" 1>&2
+    return 2
+  fi
+  local start_cnt=$(cat $syspath/mismatch_cnt)
+  if [ x"$start_cnt" != x"0" ] ; then
+    echo "$devname: Non-zero mismatch_cnt ($start_cnt)" 1>&2
+  fi
+
+  # Starting check
+  echo check > $syspath/sync_action
+
+  while [ x"$(cat $syspath/sync_action)" = x"check" ]
+  do
+    sleep $waitcnt
+  done
+
+  local end_cnt=$(cat $syspath/mismatch_cnt)
+  if [ x"$start_cnt" != x"$end_cnt" ] ; then
+    echo "$devname: SCRUB ERROR.... CNT: $end_cnt" 1>&2
+    return 4
+  fi
+  return 0
+}
+
+count=0
+for dp in "$@"
+do
+  prefix=""
+  notify=$(scrub_check "$dp" 2>&1) && prefix="WARN: "
+  if [ -n "$notify" ] ; then
+    $notify_cmd "$prefix$notify"
+    count=$(expr $count + 1)
+  fi
+done
+[ $count -eq 0 ] && $notify_cmd "MD_SCRUBBER RUN, NO ERRORS"
