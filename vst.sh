@@ -246,7 +246,8 @@ pp() {
 EOF
 
 
-(pp | xmlgen) <<EOF
+
+: <<EOF
 # Comments
 domain type="kvm":
   name: ts1
@@ -387,3 +388,203 @@ domain type="kvm":
     #~ :
 EOF
 
+
+: <<EOF
+# Comments
+domain type="kvm":
+  name: ts1
+  uuid: $(g_uuid)
+  memory unit="MiB": 1024
+  vcpu: 1
+  os:
+    type arch="x86_64": hvm
+    boot dev="cdrom"
+    boot dev="hd"
+  :
+  features:
+    acpi
+  :
+  clock sync="utc"
+  devices:
+    #~ emulator: /usr/bin/qemu-kvm
+    watchdog model="i6300esb"
+    console type="pty":
+      target type="serial"
+    :
+    graphics type="vnc" port="-1":
+      listen type="address" address="0.0.0.0"
+    :
+    # Storage configuration
+    disk type="block" device="disk":
+      source dev="/dev/hdvg0/ts1-v1"
+      target dev="vda"
+    :
+    disk type="network" device="cdrom":
+      source protocol="http" name="/Files/Temp/isolib-installers/os/elementary/elementaryos-0.3.2-stable-amd64.20151209.iso":
+	host name="alvm1.localnet" port="80"
+      :
+      target dev="vdb"
+    :
+    # Network configuration
+    interface type="bridge":
+      source bridge="br4"
+      mac address="$(g_macaddr)"
+      model type="virtio"
+    :
+EOF
+
+m_error() {
+  echo "# $*"
+  echo "ERROR: $*" 1>&2
+  return 0
+}
+
+m_parse() {
+  local name="$1" ; shift
+  local switch='case "$1" in'
+  local i check=""
+  for i in $opts
+  do
+    if (echo $i | grep -q '?$') ; then
+      i=$(echo $i | sed -e 's/?$//')
+    else
+      if [ -z "$check" ] ; then
+	check="$i"
+      else
+	check="$check $i"
+      fi
+    fi
+    switch="$switch
+	${i}=*) ${i}=\${1#$i=} ;; "
+  done
+  switch="$switch
+	*) m_error \"$name: Invalid specification \\\"\$1\\\"\" ; return 1 ;;"
+  switch="$switch
+	esac"
+
+  #echo "$switch"
+  while [ $# -gt 0 ]
+  do
+    eval "$switch"
+    shift
+  done
+
+  # Check if parameter is there...
+  rc=0
+  for i in $check
+  do
+    eval "local j=\${$i:-}"
+    [ -n "$j" ] && continue
+    rc=1
+    m_error "$name: $i not specified"
+  done
+
+  return $rc
+}
+
+m_disc_block() {
+  local vdev="" path=""
+  local opts="vdev path"
+  m_parse m_disc_block "$@" || return 1
+  cat <<-_EOF_
+    # Storage configuration
+    disk type="block" device="disk":
+      source dev="$path"
+      target dev="$vdev"
+    :
+	_EOF_
+}
+m_disc_file() {
+  local vdev="" file=""
+  local opts="vdev file"
+  m_parse m_disc_file "$@" || return 1
+  cat <<-_EOF_
+    disk type="file" device="disk":
+      source file="$file"
+      target dev="$vdev"
+    :
+	_EOF_
+}
+
+m_cdrom_local() {
+  local vdev="" iso=""
+  local opts="vdev iso"
+  m_parse m_cdrom_local "$@" || return 1
+  cat <<-_EOF_
+    disk type="file" device="cdrom":
+      source file="$iso"
+      target dev="$vdev"
+    :
+	_EOF_
+}
+m_cdrom_http() {
+  local vdev="" url=""
+  local opts="vdev url"
+  m_parse m_cdrom_http "$@" || return 1
+
+  local proto=$(echo "$url" | cut -d: -f1)
+  local path=$(echo "$url" | cut -d: -f2- | sed -e 's!^//!!')
+  local host=$(echo "$path" | cut -d/ -f1) port=80
+  path=/$(echo "$path" | cut -d/ -f2-)
+  if (echo $host | grep -q :) ; then
+    port=$(echo $host | cut -d: -f2-)
+    host=$(echo $host | cut -d: -f1)
+  fi
+  cat <<-_EOF_
+    disk type="network" device="cdrom":
+      source protocol="$proto" name="$path":
+	host name="$host" port="$port"
+      :
+      target dev="$vdev"
+    :
+	_EOF_
+}
+
+m_net_brnic() {
+  local br=br0 mac="" type="virtio"
+  local opts="br mac? type"
+  m_parse m_net_brnic "$@" || return 1
+  [ -z "$mac" ] && mac=$(g_macaddr)
+  [ $(expr length "$mac") -eq 8 ] && mac="$oui_prefix:$mac"
+
+  cat <<-_EOF_
+    interface type="bridge":
+      source bridge="$br"
+      mac address="$mac"
+      model type="$type"
+    :
+	_EOF_
+}
+(pp | xmlgen) <<EOF
+# Comments
+domain type="kvm":
+  name: ts1
+  uuid: $(g_uuid)
+  memory unit="MiB": 1024
+  vcpu: 1
+  os:
+    type arch="x86_64": hvm
+    boot dev="cdrom"
+    boot dev="hd"
+  :
+  features:
+    acpi
+  :
+  clock sync="utc"
+  devices:
+    #~ emulator: /usr/bin/qemu-kvm
+    watchdog model="i6300esb"
+    console type="pty":
+      target type="serial"
+    :
+    graphics type="vnc" port="-1":
+      listen type="address" address="0.0.0.0"
+    :
+    # Storage configuration
+    $(m_disc_block vdev=vda path=/dev/hdvg0/ts1-v1)
+    $(m_disc_file vdev=vdc file=/medias/isolib/boot-params/rs1.vfat)
+    $(m_cdrom_local vdev="vdb" iso="/media/isolib/boot-cd/alpine-virt-3.7.0-x86_64.iso")
+    $(m_cdrom_http vdev="vdb" url="http://alvm1.localnet/Files/Temp/isolib-installers/os/elementary/elementaryos-0.3.2-stable-amd64.20151209.iso")
+    # Network configuration
+    $(m_net_brnic br=br4)
+EOF
