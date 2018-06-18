@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+set -euf -o pipefail
+
+for i in mode res compress dest exopts
+do
+  eval ${i}=
+done
+unset x
+
+
+settings_receipt() {
+  mode=gray	# gray, color, or lineart
+  res=75		# 300 is default,
+  compress=jpeg	# none or jpeg
+  dest=pdf	# file, viewer, editor, pdf, print
+  exopts="--pdf=/bin/true"
+}
+
+if [ $# -eq 0 ] ; then
+  echo "Select profile:"
+  declare -F | sed -e 's/^declare.*settings_/	/'
+  exit
+fi
+settings_"$1" ; shift
+
+hp-scan \
+  --mode=$mode \
+  --res=$res \
+  --compression=$compress \
+  --dest=$dest \
+  $exopts
+
+
+
+  

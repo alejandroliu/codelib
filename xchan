@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# Private communication channel handler script
+#
+set -euf -o pipefail
+
+version="0.1"
+
+die() {
+  local rc="$1" ; shift
+  echo "$@"
+  exit $rc
+}
+
+[ $# -eq 0 ] && die 1 "Unconfigured channel"
+guest="$1" ; shift
+
+while read cmd args
+do
+  case "$cmd" in
+  datetime)
+    date +"%s"
+    ;;
+  genuuid)
+    cat /proc/sys/kernel/random/uuid
+    ;;
+  guest)
+    echo "$guest"
+    ;;
+  version)
+    echo "xchan $version"
+    ;;
+  *)
+    echo "Unknown command"
+    ;;
+  esac
+done
