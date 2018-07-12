@@ -1,0 +1,184 @@
+#!/bin/sh
+#
+# Create a Alpine CHROOT (for VServers...)
+#
+set -eu -o pipefail
+
+#
+# Configurable settings
+#
+alpine_mirror=http://nl.alpinelinux.org/alpine
+vrel=v3.8
+arch=x86_64
+init_user=""
+#
+# Functions
+#
+die() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+debug() {
+  echo "$@" 1>&2
+}
+get_apk_list() {
+  ## Get a list of APK files in a repository...
+  ## # USAGE
+  ##   get_apk_list mirror release arch
+  ## # ARGS
+  ## * mirror -- Alpine Linux mirror URL
+  ## * release -- release to use
+  ## * arch -- architecture (x86_64|x86)
+  ## # OUTPUT
+  ## List of found APKs
+  local \
+    mirror="$1" \
+    release="$2" \
+    x_arch="$3"
+
+  wget -nv -O- $mirror/$release/main/$x_arch/ \
+    | sed -e 's/href=/\nhref=/' | sed -e 's/>/\n/' \
+    | grep 'href=' |grep 'apk' \
+    | sed -e 's/href=["'\'']//' | sed -e 's/apk["'\'']/apk/'
+}
+pick_apk_tools() {
+  local \
+	mirror="$1" \
+	release="$2" \
+	x_arch="$3"
+  local apk_list="$(get_apk_list "$mirror" "$release" "$x_arch")"
+  [ -z "$apk_list" ] && die 103 "No APK files found"
+  debug Pkgs Found: $(echo "$apk_list" | wc -l)
+  local apk_tools_apk="$(echo "$apk_list" | grep 'apk-tools-static-' | sort | tail -1)"
+  echo $apk_tools_apk
+}
+get_apk_tool() {
+  local \
+	mirror="$1" \
+	release="$2" \
+	x_arch="$3" \
+	static="$4"
+  local apk_tool_apk="$(pick_apk_tools "$mirror" "$release" "$x_arch")"
+  [ -z "$apk_tool_apk" ] && die 63 "apktool-static not found"
+  local unpackd=$(mktemp -d)
+
+  if ! wget -nv -O"$unpackd/$apk_tool_apk" "${alpine_mirror}/${vrel}/main/${x_arch}/$apk_tool_apk" ; then
+    rm -f "$unpackd"
+    die 68 "Error downlaoding $apk_tool_apk"
+  fi
+  if ! tar -zxf "$unpackd/$apk_tool_apk" -C "$unpackd" ; then
+    rm -f "$unpackd"
+    die 72 "Error unpacking $apk_tool_apk"
+  fi
+  if cp "$unpackd/sbin/apk.static" "$static" ; then
+    chmod a+x "$static"
+    rm -rf "$unpackd"
+    return 0
+  fi
+  rm -rf "$unpackd"
+  die 79 "Error copying apk.static to $static"
+}
+create_chroot() {
+  local chroot="$1" ; shift
+  [ -d "$chroot" ] && die 84 "$chroot: already exists"
+  [ $# -eq 0 ] && set - alpine-base alpine-sdk
+  
+  local apktool=$(mktemp)
+  get_apk_tool "$alpine_mirror" "$vrel" "$arch" "$apktool"
+  $root $apktool \
+	  --repository ${alpine_mirror}/${vrel}/main \
+	  -U \
+	  --allow-untrusted \
+	  --root "${chroot}" \
+	  --initdb \
+	  add "$@"
+  local rc="$?"
+  rm "$apktool"
+  [ $rc -ne 0 ] && return $rc
+
+  if [ -n "$init_user" ] ; then
+    grep -q "^$init_user:" "$chroot/etc/group" || $root chroot "$chroot" addgroup -g $(id -g "$init_user") "$init_user"
+    grep -q "^$init_user:" "$chroot/etc/passwd" || $root chroot "$chroot" adduser -D -G "$init_user" -u $(id -u "$init_user") "$init_user"
+    echo "$init_user ALL=(ALL) NOPASSWD:ALL" | $root tee "$chroot/etc/sudoers.d/$init_user"
+  fi
+  echo "${alpine_mirror}/${vrel}/main" | $root tee "$chroot/etc/apk/repositories"
+}
+#
+# Check for root access
+#
+
+if [ $(id -u) -eq 0 ] ; then
+  root=""
+else
+  if ! sudo true ; then
+    die 23 "Exiting... the rest of the script requires root priviledges"
+  fi
+  root="sudo"
+  init_user="$USER"
+fi
+
+#
+# Parse args...
+#
+while [ $# -gt 0 ]
+do
+  case "$1" in
+  --mirror=*)	alpine_mirror=${1#--mirror=} ;;
+  --rel=*)	vrel=${1#--rel=} ;;
+  --arch=*)	arch=${1#--arch=} ;;
+  --no-init-user)	init_user="" ;;
+  --init-user)
+    if [ -z "$root" ] ; then
+      [ -z "${SUDO_USER:-}" ] && die 125 "Unable to determine user for --init-user"
+      init_user="$SUDO_USER"
+    else
+      init_user="$USER"
+    fi
+    ;;
+  *) break ;;
+  esac
+  shift
+done
+
+create_chroot "$@"
+
+
+exit
+run_alpine() {
+  # Create Alpine Linux packages
+  local release="$1" version ; shift
+
+  case "$release" in
+    3.7)  version=2.9.1-r2 ;;
+    *) echo "Unsupported release: $release"; exit 1 ;;
+  esac
+  
+  local alpine_dir=alpine-v$release
+  mkdir -p ${alpine_dir}
+  
+  local apkfile=$alpine_dir/apk-tools-static.apk
+  [ ! -f $apkfile  ] && wget -O$apkfile ${alpine_mirror}/v${release}/main/x86_64/apk-tools-static-${version}.apk
+  [ ! -f $alpine_dir/sbin/apk.static ] && tar -zxf $apkfile -C $alpine_dir
+
+  local chrootdir=$alpine_dir/chroot
+  sudo $alpine_dir/sbin/apk.static \
+	  --repository ${alpine_mirror}/v${release}/main \
+	  -U \
+	  --allow-untrusted \
+	  --root ${chrootdir} \
+	  --initdb \
+	  add alpine-base alpine-sdk gdbm gdbm-dev
+
+  sudo chmod 777 $chrootdir
+
+  echo "${alpine_mirror}/v${release}/main" | sudo tee $chrootdir/etc/apk/repositories
+  sudo cp /etc/resolv.conf $chrootdir/etc/resolv.conf
+
+  rmount $chrootdir; trap "rumount $chrootdir" EXIT
+  sudo chroot $chrootdir su - -s /bin/sh $USER
+  rumount $chrootdir ; trap "" EXIT
+}
+
+#~ run_alpine 3.7
+

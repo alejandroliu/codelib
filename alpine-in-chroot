@@ -1,0 +1,109 @@
+#!/bin/sh
+#
+# Enter a chroot
+#
+set -eu -o pipefail
+
+#
+# Functions
+#
+die() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+pair() {
+  local _i="$1" _j="$2" k="$3" v
+  v=$(echo "$k" | cut -d: -f1)
+  eval ${_i}=\"\$v\"
+  v=$(echo "$k" | cut -d: -f2)
+  eval ${_j}=\"\$v\"
+}
+check_dirs() {
+  local i j rc=0
+  for i in "$@"
+  do
+    if (echo "$i" | grep -q :) ; then
+      pair i j "$i"
+    else
+      j="$i"
+    fi
+    if [ ! -d "/$i" ] ; then
+      echo "/$i: not found" 1>&2
+      rc=1
+    fi
+    if [ ! -d "$chrootd/$j" ] ; then
+      echo "$chrootd/$j: not found" 1>&2
+      rc=1
+    fi
+    echo -n "$i:$j "
+  done
+  return $rc
+}
+mount_binds() {
+  local i
+  for i in "$@"
+  do
+    pair i j "$i"
+    $root mount --bind "/$i" "$chrootd/$j"
+  done
+}
+umount_binds() {
+  local i
+  for i in "$@"
+  do
+    pair i j "$i"
+    $root umount "$chrootd/$j" || :
+  done
+}
+
+#
+# Check for root access
+#
+if [ $(id -u) -eq 0 ] ; then
+  root=""
+else
+  if ! sudo true ; then
+    die 23 "Exiting... the rest of the script requires root priviledges"
+  fi
+  root="sudo"
+fi
+
+#
+# Parse args...
+#
+bind_dirs="dev sys proc tmp"
+while [ $# -gt 0 ]
+do
+  case "$1" in
+  --no-binds) bind_dirs="" ;;
+  --bind=*)
+    if [ -z "$bind_dirs" ] ; then
+      bind_dirs="${1#--bind=}"
+    else
+      bind_dirs="$bind_dirs ${1#--bind=}"
+    fi
+    ;;
+  *) break ;;
+  esac
+  shift
+done
+
+chrootd="$1" ; shift
+[ ! -d "$chrootd" ] && die 34 "$chrootd: Not found"
+[ $# -eq 0 ] && set - bin/sh -il
+
+
+#
+# Sanity check environment...
+#
+bind_dirs="$(check_dirs $bind_dirs)" || exit 1
+
+trap "umount_binds $bind_dirs" EXIT
+mount_binds $bind_dirs || exit 1
+$root cp /etc/resolv.conf "$chrootd/etc/resolv.conf"
+
+$root chroot "$chrootd" $@
+
+
+
